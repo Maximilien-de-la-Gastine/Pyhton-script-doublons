@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# mp3_dup_finder_gui_table.py
+# mp3_dup_finder_gui_table_fixed.py
 # Requirements: pip install PySimpleGUI mutagen
 
 import os
@@ -43,7 +43,6 @@ def get_duration(path):
         f = MutagenFile(path)
         if not f or not f.info:
             return ""
-        # durée format mm:ss
         total_seconds = int(f.info.length)
         minutes = total_seconds // 60
         seconds = total_seconds % 60
@@ -108,9 +107,9 @@ layout = [
     [sg.ProgressBar(max_value=100, orientation='h', size=(40, 20), key="-PROG-")],
     [sg.Text("Fichiers traités: 0 / 0", key="-PROGTXT-")],
     [sg.Table(values=[],
-              headings=["Titre", "Artiste", "Album", "Dossier", "Durée"],
+              headings=["Titre", "Artiste", "Album", "Dossier", "Durée", "Chemin"],  # chemin ajouté
               auto_size_columns=False,
-              col_widths=[30,30,30,20,10],
+              col_widths=[30,30,30,20,10,0],  # dernière colonne cachée
               display_row_numbers=False,
               justification='left',
               key="-TABLE-",
@@ -155,7 +154,7 @@ while True:
                         album = (t.get("album") or [""])[0]
                         folder = os.path.basename(os.path.dirname(p))
                         duration = get_duration(p)
-                        table_values.append([title, artist, album, folder, duration])
+                        table_values.append([title, artist, album, folder, duration, p])  # chemin complet
                 window["-TABLE-"].update(values=table_values)
                 window["-STATUS-"].update(f"Scan terminé — {len(groups_cache)} groupes trouvés")
                 window["-START-"].update(disabled=False)
@@ -217,40 +216,32 @@ while True:
             sg.popup("Erreur export:", e)
 
     if event == "-MOVE-":
-        selected = values["-TABLE-"]
-        if not selected:
-            sg.popup("Sélectionnez des fichiers à déplacer.")
+        if not groups_cache:
+            sg.popup("Aucun groupe à traiter.")
             continue
         dest = sg.popup_get_folder("Dossier cible pour déplacer les doublons")
         if not dest:
             continue
         try:
             os.makedirs(dest, exist_ok=True)
-            table_values = window["-TABLE-"].get()
-            for idx in selected:
-                title = table_values[idx][0]
-                # retrouver le chemin complet
-                full_path = None
-                for g in groups_cache:
-                    for p in g["files"]:
-                        tags = g.get("tags", [{}])[g["files"].index(p)]
-                        p_title = (tags.get("title") or [""])[0]
-                        if p_title == title:
-                            full_path = p
-                            break
-                    if full_path:
-                        break
-                if not full_path:
-                    continue
-                dst_path = os.path.join(dest, os.path.basename(full_path))
-                base, ext = os.path.splitext(dst_path)
-                c = 1
-                while os.path.exists(dst_path):
-                    dst_path = f"{base}_{c}{ext}"
-                    c += 1
-                shutil.move(full_path, dst_path)
-            sg.popup("Déplacement terminé.")
+            for g in groups_cache:
+                # on déplace tous les fichiers sauf le premier (on garde un original)
+                to_move = g["files"][1:]
+                for p in to_move:
+                    fn = os.path.basename(p)
+                    dst_path = os.path.join(dest, fn)
+                    base, ext = os.path.splitext(dst_path)
+                    c = 1
+                    # si un fichier existe déjà dans le dossier cible, on renomme
+                    while os.path.exists(dst_path):
+                        dst_path = f"{base}_{c}{ext}"
+                        c += 1
+                    shutil.move(p, dst_path)
+            sg.popup("Déplacement terminé. Tous les doublons ont été déplacés vers:", dest)
+            window["-STATUS-"].update("Déplacement terminé")
         except Exception as e:
             sg.popup("Erreur déplacement:", e)
+
+
 
 window.close()
