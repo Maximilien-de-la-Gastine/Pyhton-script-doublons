@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# find_dup_mp3_gui.py
+# mp3_dup_finder_gui.py
 # Requirements: pip install PySimpleGUI mutagen
 
 import os
@@ -40,14 +40,14 @@ def read_tags(path):
 
 def find_duplicates(root, progress_q=None, algo="md5"):
     size_map = defaultdict(list)
-    files = []
-    for p in iter_mp3_files(root):
+    files = list(iter_mp3_files(root))
+    for p in files:
         try:
             sz = os.path.getsize(p)
         except OSError:
             continue
         size_map[sz].append(p)
-        files.append(p)
+
     total_files = len(files)
     if progress_q:
         progress_q.put(("total", total_files))
@@ -78,7 +78,6 @@ def find_duplicates(root, progress_q=None, algo="md5"):
         g["tags"] = [read_tags(p) for p in g["files"]]
     return groups
 
-# ---------------- threading wrapper ----------------
 def scan_worker(root, q, algo):
     try:
         groups = find_duplicates(root, progress_q=q, algo=algo)
@@ -116,7 +115,7 @@ def update_progress_bar(progress, total):
 while True:
     event, values = window.read(timeout=200)
 
-    # handle queue messages
+    # --- handle progress queue ---
     try:
         while True:
             msg = msg_q.get_nowait()
@@ -124,12 +123,14 @@ while True:
             if typ == "total":
                 total_files = msg[1]
             elif typ == "progress":
-                progress = msg[1]
-                update_progress_bar(progress, total_files)
+                update_progress_bar(msg[1], total_files)
             elif typ == "done":
                 groups_cache = msg[1]
-                lines = [f"{os.path.basename(p)} ({len(g['files'])} doublons)" 
-                         for g in groups_cache for p in g["files"]]
+                lines = [
+                    f"{os.path.basename(p)} (taille={g['size']} octets)"
+                    for g in groups_cache
+                    for p in g["files"]
+                ]
                 window["-GROUPS-"].update(lines)
                 window["-STATUS-"].update(f"Scan terminé — {len(groups_cache)} groupes trouvés")
                 window["-START-"].update(disabled=False)
@@ -141,6 +142,7 @@ while True:
     except queue.Empty:
         pass
 
+    # --- window events ---
     if event == sg.WINDOW_CLOSED:
         break
 
@@ -161,19 +163,19 @@ while True:
         groups_cache = []
 
     if event == "-STOP-":
-        sg.popup("Arrêt demandé — l'arrêt immédiat n'est pas implémenté. Fermez la fenêtre pour stopper.")
+        sg.popup("Arrêt demandé — fermez la fenêtre pour stopper.")
         window["-STATUS-"].update("Arrêt demandé (fermez la fenêtre pour forcer l'arrêt)")
 
     if event == "-SHOW-":
         sel = values["-GROUPS-"]
         if not sel:
-            sg.popup("Sélectionnez un fichier dans la liste.")
+            sg.popup("Sélectionnez un fichier.")
             continue
         sg.popup_scrolled("\n".join(sel), title="Fichiers du groupe", size=(100,30))
 
     if event == "-EXPORT-":
         if not groups_cache:
-            sg.popup("Aucun groupe à exporter.")
+            sg.popup("Aucun résultat à exporter.")
             continue
         out = sg.popup_get_file("Nom du fichier CSV", save_as=True,
                                 file_types=(("CSV Files","*.csv"),),
@@ -181,8 +183,8 @@ while True:
         if not out:
             continue
         try:
-            with open(out, "w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
+            with open(out, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f, delimiter=';')
                 writer.writerow(["title","artist","album","folder"])
                 for g in groups_cache:
                     for p, t in zip(g["files"], g.get("tags", [{}])):
@@ -197,28 +199,25 @@ while True:
 
     if event == "-MOVE-":
         if not groups_cache:
-            sg.popup("Aucun groupe à traiter.")
+            sg.popup("Aucun fichier à déplacer.")
             continue
-        dest = sg.popup_get_folder("Dossier cible pour déplacer doublons (un sous-dossier par groupe)")
+        dest = sg.popup_get_folder("Dossier cible pour déplacer doublons")
         if not dest:
             continue
         try:
             os.makedirs(dest, exist_ok=True)
-            for i, g in enumerate(groups_cache, 1):
-                grp_folder = os.path.join(dest, f"group_{i}")
-                os.makedirs(grp_folder, exist_ok=True)
-                to_move = g["files"][1:]
+            for g in groups_cache:
+                to_move = g["files"][1:]  # garder le premier fichier
                 for p in to_move:
                     fn = os.path.basename(p)
-                    newp = os.path.join(grp_folder, fn)
-                    base, ext = os.path.splitext(newp)
+                    dst_path = os.path.join(dest, fn)
+                    base, ext = os.path.splitext(dst_path)
                     c = 1
-                    while os.path.exists(newp):
-                        newp = f"{base}_{c}{ext}"
+                    while os.path.exists(dst_path):
+                        dst_path = f"{base}_{c}{ext}"
                         c += 1
-                    shutil.move(p, newp)
-            sg.popup("Déplacement terminé. Les doublons ont été déplacés vers:", dest)
-            window["-STATUS-"].update("Déplacement terminé")
+                    shutil.move(p, dst_path)
+            sg.popup("Déplacement terminé.")
         except Exception as e:
             sg.popup("Erreur déplacement:", e)
 
