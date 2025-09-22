@@ -230,26 +230,38 @@ while True:
         try:
             os.makedirs(dest, exist_ok=True)
 
+            # pour chaque groupe
             for g in groups_cache:
-                # trouver tous les dossiers des fichiers du groupe
                 folders = sorted(set(os.path.dirname(p) for p in g["files"]))
                 
                 preserve_folder = None
-
-                # si plus d'un dossier, demander lequel préserver
+                
                 if len(folders) > 1:
-                    # vérifier si un des dossiers a déjà une décision mémorisée
+                    # Vérifier si on a déjà une décision mémorisée
                     for f in folders:
                         if f in preserve_map:
                             preserve_folder = preserve_map[f]
                             break
-
+                    
                     if not preserve_folder:
-                        # popup liste pour choisir le dossier à conserver
-                        layout_choice = [[sg.Text("Choisissez le dossier à PRESERVER :")],
-                                        [sg.Listbox(folders, size=(80, len(folders)), key="-CHOICE-", select_mode=sg.LISTBOX_SELECT_MODE_SINGLE)],
-                                        [sg.Button("OK"), sg.Button("Annuler")]]
+                        # On prend le premier fichier du groupe pour afficher ses infos
+                        first_file = g["files"][0]
+                        tags = g.get("tags", [{}])[0] if g.get("tags") else {}
+                        title = (tags.get("title") or [""])[0]
+                        artist = (tags.get("artist") or [""])[0]
+                        album = (tags.get("album") or [""])[0]
+                        duration = get_duration(first_file)
+                        
+                        info_text = f"Premier doublon :\nTitre: {title}\nArtiste: {artist}\nAlbum: {album}\nDurée: {duration}\n\nChoisissez le dossier à PRESERVER :"
+                        
+                        # popup liste avec dossiers et info
+                        layout_choice = [
+                            [sg.Text(info_text)],
+                            [sg.Listbox(folders, size=(80, len(folders)), key="-CHOICE-", select_mode=sg.LISTBOX_SELECT_MODE_SINGLE)],
+                            [sg.Button("OK"), sg.Button("Annuler")]
+                        ]
                         win_choice = sg.Window("Sélection du dossier à préserver", layout_choice, modal=True)
+                        
                         while True:
                             e, v = win_choice.read()
                             if e in (sg.WINDOW_CLOSED, "Annuler"):
@@ -259,13 +271,13 @@ while True:
                             if e == "OK" and v["-CHOICE-"]:
                                 preserve_folder = v["-CHOICE-"][0]
                                 win_choice.close()
-                                # demander si mémoriser cette décision
+                                # demander si mémoriser la décision
                                 remember = sg.popup_yes_no(f"Voulez-vous toujours préserver {preserve_folder} pour les futurs doublons de ce dossier ?")
                                 if remember == "Yes":
                                     preserve_map[preserve_folder] = preserve_folder
                                 break
 
-                # déplacer tous les fichiers hors du dossier préservé
+                # <-- déplacement CORRECT : en dehors de la boucle while de la popup
                 for p in g["files"]:
                     folder = os.path.dirname(p)
                     if preserve_folder and os.path.abspath(folder) == os.path.abspath(preserve_folder):
