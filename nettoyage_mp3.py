@@ -38,6 +38,19 @@ def read_tags(path):
     except Exception:
         return {}
 
+def get_duration(path):
+    try:
+        f = MutagenFile(path)
+        if not f or not f.info:
+            return ""
+        # durée format mm:ss
+        total_seconds = int(f.info.length)
+        minutes = total_seconds // 60
+        seconds = total_seconds % 60
+        return f"{minutes}:{seconds:02d}"
+    except Exception:
+        return ""
+
 def find_duplicates(root, progress_q=None, algo="md5"):
     size_map = defaultdict(list)
     files = list(iter_mp3_files(root))
@@ -95,9 +108,9 @@ layout = [
     [sg.ProgressBar(max_value=100, orientation='h', size=(40, 20), key="-PROG-")],
     [sg.Text("Fichiers traités: 0 / 0", key="-PROGTXT-")],
     [sg.Table(values=[],
-              headings=["Fichier", "Titre", "Artiste", "Album", "Dossier"],
+              headings=["Titre", "Artiste", "Album", "Dossier", "Durée"],
               auto_size_columns=False,
-              col_widths=[30,30,30,30,20],
+              col_widths=[30,30,30,20,10],
               display_row_numbers=False,
               justification='left',
               key="-TABLE-",
@@ -141,7 +154,8 @@ while True:
                         artist = (t.get("artist") or [""])[0]
                         album = (t.get("album") or [""])[0]
                         folder = os.path.basename(os.path.dirname(p))
-                        table_values.append([os.path.basename(p), title, artist, album, folder])
+                        duration = get_duration(p)
+                        table_values.append([title, artist, album, folder, duration])
                 window["-TABLE-"].update(values=table_values)
                 window["-STATUS-"].update(f"Scan terminé — {len(groups_cache)} groupes trouvés")
                 window["-START-"].update(disabled=False)
@@ -189,15 +203,15 @@ while True:
         try:
             with open(out, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f, delimiter=';')
-                writer.writerow(["file","title","artist","album","folder"])
+                writer.writerow(["title","artist","album","folder","duration"])
                 for g in groups_cache:
                     for p, t in zip(g["files"], g.get("tags", [{}])):
-                        file_name = os.path.basename(p)
                         title = (t.get("title") or [""])[0]
                         artist = (t.get("artist") or [""])[0]
                         album = (t.get("album") or [""])[0]
                         folder = os.path.basename(os.path.dirname(p))
-                        writer.writerow([file_name, title, artist, album, folder])
+                        duration = get_duration(p)
+                        writer.writerow([title, artist, album, folder, duration])
             sg.popup("Export terminé:", out)
         except Exception as e:
             sg.popup("Erreur export:", e)
@@ -214,12 +228,14 @@ while True:
             os.makedirs(dest, exist_ok=True)
             table_values = window["-TABLE-"].get()
             for idx in selected:
-                file_name = table_values[idx][0]
+                title = table_values[idx][0]
                 # retrouver le chemin complet
                 full_path = None
                 for g in groups_cache:
                     for p in g["files"]:
-                        if os.path.basename(p) == file_name:
+                        tags = g.get("tags", [{}])[g["files"].index(p)]
+                        p_title = (tags.get("title") or [""])[0]
+                        if p_title == title:
                             full_path = p
                             break
                     if full_path:
