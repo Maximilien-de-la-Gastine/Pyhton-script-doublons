@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# mp3_dup_finder_gui_table_fixed.py
+# mp3_dup_finder_gui_multi_criteria.py
 # Requirements: pip install PySimpleGUI mutagen
 
 import os
@@ -50,49 +50,83 @@ def get_duration(path):
     except Exception:
         return ""
 
-def find_duplicates(root, progress_q=None, algo="md5"):
-    size_map = defaultdict(list)
+# ---------------- scan ----------------
+def find_duplicates(root, methods, progress_q=None, algo="md5"):
+    """
+    methods: list de critères ['hash', 'name', 'duration', 'size']
+    """
     files = list(iter_mp3_files(root))
-    for p in files:
-        try:
-            sz = os.path.getsize(p)
-        except OSError:
-            continue
-        size_map[sz].append(p)
-
     total_files = len(files)
     if progress_q:
         progress_q.put(("total", total_files))
 
-    hash_map = defaultdict(list)
+    # Préparer les informations nécessaires
+    file_infos = []
     processed = 0
-    for sz, paths in size_map.items():
-        if len(paths) == 1:
-            processed += len(paths)
-            if progress_q:
-                progress_q.put(("progress", processed))
-            continue
-        for p in paths:
+    for f in files:
+        info = {"path": f}
+        if 'hash' in methods:
             try:
-                h = file_hash(p, algo=algo)
-                hash_map[(sz, h)].append(p)
+                info['hash'] = file_hash(f, algo=algo)
             except Exception:
-                pass
-            processed += 1
-            if progress_q:
-                progress_q.put(("progress", processed))
+                info['hash'] = None
+        if 'name' in methods:
+            # Nom du fichier sans extension + tag title
+            tags = read_tags(f)
+            info['title'] = (tags.get("title") or [os.path.splitext(os.path.basename(f))[0]])[0]
+        if 'duration' in methods:
+            info['duration'] = get_duration(f)
+        if 'size' in methods:
+            try:
+                info['size'] = os.path.getsize(f)
+            except Exception:
+                info['size'] = None
+        file_infos.append(info)
+        processed += 1
+        if progress_q:
+            progress_q.put(("progress", processed))
 
+    # Comparer selon les méthodes sélectionnées
     groups = []
-    for (sz, h), paths in hash_map.items():
-        if len(paths) > 1:
-            groups.append({"size": sz, "hash": h, "files": sorted(paths)})
+    used = set()
+    for i, fi in enumerate(file_infos):
+        if fi['path'] in used:
+            continue
+        group = [fi['path']]
+        for j in range(i+1, len(file_infos)):
+            fj = file_infos[j]
+            if fj['path'] in used:
+                continue
+            match = True
+            for m in methods:
+                if m == 'hash' and fi.get('hash') != fj.get('hash'):
+                    match = False
+                    break
+                if m == 'name' and fi.get('title') != fj.get('title'):
+                    match = False
+                    break
+                if m == 'duration' and fi.get('duration') != fj.get('duration'):
+                    match = False
+                    break
+                if m == 'size' and fi.get('size') != fj.get('size'):
+                    match = False
+                    break
+            if match:
+                group.append(fj['path'])
+                used.add(fj['path'])
+        if len(group) > 1:
+            groups.append(group)
+            used.update(group)
+    # Lire les tags pour affichage
+    final_groups = []
     for g in groups:
-        g["tags"] = [read_tags(p) for p in g["files"]]
-    return groups
+        tags = [read_tags(p) for p in g]
+        final_groups.append({'files': g, 'tags': tags})
+    return final_groups
 
-def scan_worker(root, q, algo):
+def scan_worker(root, methods, q, algo):
     try:
-        groups = find_duplicates(root, progress_q=q, algo=algo)
+        groups = find_duplicates(root, methods, progress_q=q, algo=algo)
         q.put(("done", groups))
     except Exception as e:
         q.put(("error", str(e)))
@@ -102,14 +136,19 @@ sg.theme("SystemDefault")
 
 layout = [
     [sg.Text("Dossier à scanner :"), sg.Input(key="-FOLDER-"), sg.FolderBrowse()],
+    [sg.Text("Méthodes de détection :")],
+    [sg.Checkbox("Hash du fichier (MD5/SHA1/SHA256)", key="-HASH-"),
+     sg.Checkbox("Nom du fichier / Titre", key="-NAME-")],
+    [sg.Checkbox("Durée de la piste", key="-DURATION-"),
+     sg.Checkbox("Taille du fichier", key="-SIZE-")],
     [sg.Text("Algorithme de hash:"), sg.Combo(["md5","sha1","sha256"], default_value="md5", key="-ALGO-")],
     [sg.Button("Lancer le scan", key="-START-"), sg.Button("Arrêter", key="-STOP-", disabled=True)],
     [sg.ProgressBar(max_value=100, orientation='h', size=(40, 20), key="-PROG-")],
     [sg.Text("Fichiers traités: 0 / 0", key="-PROGTXT-")],
     [sg.Table(values=[],
-              headings=["Titre", "Artiste", "Album", "Dossier", "Durée", "Chemin"],  # chemin ajouté
+              headings=["Titre", "Artiste", "Album", "Dossier", "Durée", "Chemin"],
               auto_size_columns=False,
-              col_widths=[30,30,30,20,10,0],  # dernière colonne cachée
+              col_widths=[30,30,30,20,10,0],
               display_row_numbers=False,
               justification='left',
               key="-TABLE-",
@@ -123,13 +162,15 @@ window = sg.Window("Find MP3 Duplicates", layout, finalize=True)
 
 worker_thread = None
 msg_q = queue.Queue()
-total_files = 0
 groups_cache = []
+total_files = 0
 
 def update_progress_bar(progress, total):
     frac = int(progress / total * 100) if total else 0
     window["-PROG-"].update(frac)
     window["-PROGTXT-"].update(f"Fichiers traités: {progress} / {total}")
+
+preserve_map = {}
 
 # ---------------- main loop ----------------
 while True:
@@ -154,9 +195,9 @@ while True:
                         album = (t.get("album") or [""])[0]
                         folder = os.path.basename(os.path.dirname(p))
                         duration = get_duration(p)
-                        table_values.append([title, artist, album, folder, duration, p])  # chemin complet
+                        table_values.append([title, artist, album, folder, duration, p])
                 window["-TABLE-"].update(values=table_values)
-                window["-STATUS-"].update(f"Scan terminé — {len(groups_cache)} groupes trouvés")
+                window["-STATUS-"].update(f"Scan terminé — {len(groups_cache)} groupes de doublons trouvés")
                 window["-START-"].update(disabled=False)
                 window["-STOP-"].update(disabled=True)
             elif typ == "error":
@@ -173,11 +214,19 @@ while True:
     if event == "-START-":
         folder = values["-FOLDER-"]
         algo = values["-ALGO-"]
+        methods = []
+        if values["-HASH-"]: methods.append("hash")
+        if values["-NAME-"]: methods.append("name")
+        if values["-DURATION-"]: methods.append("duration")
+        if values["-SIZE-"]: methods.append("size")
         if not folder or not os.path.isdir(folder):
             sg.popup("Veuillez sélectionner un dossier valide.")
             continue
+        if not methods:
+            sg.popup("Veuillez sélectionner au moins une méthode de détection.")
+            continue
         msg_q = queue.Queue()
-        worker_thread = threading.Thread(target=scan_worker, args=(folder, msg_q, algo), daemon=True)
+        worker_thread = threading.Thread(target=scan_worker, args=(folder, methods, msg_q, algo), daemon=True)
         worker_thread.start()
         window["-STATUS-"].update("Scan en cours...")
         window["-START-"].update(disabled=True)
@@ -202,7 +251,7 @@ while True:
         try:
             with open(out, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f, delimiter=';')
-                writer.writerow(["title","artist","album","folder","duration"])
+                writer.writerow(["title","artist","album","folder","duration","path"])
                 for g in groups_cache:
                     for p, t in zip(g["files"], g.get("tags", [{}])):
                         title = (t.get("title") or [""])[0]
@@ -210,78 +259,59 @@ while True:
                         album = (t.get("album") or [""])[0]
                         folder = os.path.basename(os.path.dirname(p))
                         duration = get_duration(p)
-                        writer.writerow([title, artist, album, folder, duration])
+                        writer.writerow([title, artist, album, folder, duration, p])
             sg.popup("Export terminé:", out)
         except Exception as e:
             sg.popup("Erreur export:", e)
-
-    # dictionnaire pour mémoriser la décision par dossier
-    preserve_map = {}
 
     if event == "-MOVE-":
         if not groups_cache:
             sg.popup("Aucun groupe à traiter.")
             continue
-
         dest = sg.popup_get_folder("Dossier cible pour déplacer les doublons")
         if not dest:
             continue
-
         try:
             os.makedirs(dest, exist_ok=True)
-
-            # pour chaque groupe
             for g in groups_cache:
                 folders = sorted(set(os.path.dirname(p) for p in g["files"]))
-                
                 preserve_folder = None
-                
-                if len(folders) > 1:
-                    # Vérifier si on a déjà une décision mémorisée
-                    for f in folders:
-                        if f in preserve_map:
-                            preserve_folder = preserve_map[f]
+                # Vérifier décision mémorisée
+                for f in folders:
+                    if f in preserve_map:
+                        preserve_folder = preserve_map[f]
+                        break
+                if not preserve_folder and len(folders) > 1:
+                    first_file = g["files"][0]
+                    tags = g.get("tags", [{}])[0] if g.get("tags") else {}
+                    title = (tags.get("title") or [""])[0]
+                    artist = (tags.get("artist") or [""])[0]
+                    album = (tags.get("album") or [""])[0]
+                    duration = get_duration(first_file)
+                    info_text = f"Premier doublon :\nTitre: {title}\nArtiste: {artist}\nAlbum: {album}\nDurée: {duration}\n\nChoisissez le dossier à PRESERVER :"
+                    layout_choice = [
+                        [sg.Text(info_text)],
+                        [sg.Listbox(folders, size=(80, len(folders)), key="-CHOICE-", select_mode=sg.LISTBOX_SELECT_MODE_SINGLE)],
+                        [sg.Button("OK"), sg.Button("Annuler")]
+                    ]
+                    win_choice = sg.Window("Sélection du dossier à préserver", layout_choice, modal=True)
+                    while True:
+                        e, v = win_choice.read()
+                        if e in (sg.WINDOW_CLOSED, "Annuler"):
+                            win_choice.close()
+                            preserve_folder = None
                             break
-                    
-                    if not preserve_folder:
-                        # On prend le premier fichier du groupe pour afficher ses infos
-                        first_file = g["files"][0]
-                        tags = g.get("tags", [{}])[0] if g.get("tags") else {}
-                        title = (tags.get("title") or [""])[0]
-                        artist = (tags.get("artist") or [""])[0]
-                        album = (tags.get("album") or [""])[0]
-                        duration = get_duration(first_file)
-                        
-                        info_text = f"Premier doublon :\nTitre: {title}\nArtiste: {artist}\nAlbum: {album}\nDurée: {duration}\n\nChoisissez le dossier à PRESERVER :"
-                        
-                        # popup liste avec dossiers et info
-                        layout_choice = [
-                            [sg.Text(info_text)],
-                            [sg.Listbox(folders, size=(80, len(folders)), key="-CHOICE-", select_mode=sg.LISTBOX_SELECT_MODE_SINGLE)],
-                            [sg.Button("OK"), sg.Button("Annuler")]
-                        ]
-                        win_choice = sg.Window("Sélection du dossier à préserver", layout_choice, modal=True)
-                        
-                        while True:
-                            e, v = win_choice.read()
-                            if e in (sg.WINDOW_CLOSED, "Annuler"):
-                                win_choice.close()
-                                preserve_folder = None
-                                break
-                            if e == "OK" and v["-CHOICE-"]:
-                                preserve_folder = v["-CHOICE-"][0]
-                                win_choice.close()
-                                # demander si mémoriser la décision
-                                remember = sg.popup_yes_no(f"Voulez-vous toujours préserver {preserve_folder} pour les futurs doublons de ce dossier ?")
-                                if remember == "Yes":
-                                    preserve_map[preserve_folder] = preserve_folder
-                                break
-
-                # <-- déplacement CORRECT : en dehors de la boucle while de la popup
-                for p in g["files"]:
-                    folder = os.path.dirname(p)
-                    if preserve_folder and os.path.abspath(folder) == os.path.abspath(preserve_folder):
-                        continue
+                        if e == "OK" and v["-CHOICE-"]:
+                            preserve_folder = v["-CHOICE-"][0]
+                            win_choice.close()
+                            remember = sg.popup_yes_no(f"Voulez-vous toujours préserver {preserve_folder} pour les futurs doublons ?")
+                            if remember == "Yes":
+                                for f in folders:
+                                    preserve_map[f] = preserve_folder
+                            break
+                # Déplacement
+                to_move = [p for p in g["files"] if os.path.dirname(p) != preserve_folder]
+                for p in to_move:
                     fn = os.path.basename(p)
                     dst_path = os.path.join(dest, fn)
                     base, ext = os.path.splitext(dst_path)
@@ -290,12 +320,9 @@ while True:
                         dst_path = f"{base}_{c}{ext}"
                         c += 1
                     shutil.move(p, dst_path)
-
             sg.popup("Déplacement terminé. Les doublons ont été déplacés vers:", dest)
             window["-STATUS-"].update("Déplacement terminé")
-
         except Exception as e:
             sg.popup("Erreur déplacement:", e)
-
 
 window.close()
