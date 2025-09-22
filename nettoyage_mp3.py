@@ -215,33 +215,75 @@ while True:
         except Exception as e:
             sg.popup("Erreur export:", e)
 
+    # dictionnaire pour mémoriser la décision par dossier
+    preserve_map = {}
+
     if event == "-MOVE-":
         if not groups_cache:
             sg.popup("Aucun groupe à traiter.")
             continue
+
         dest = sg.popup_get_folder("Dossier cible pour déplacer les doublons")
         if not dest:
             continue
+
         try:
             os.makedirs(dest, exist_ok=True)
+
             for g in groups_cache:
-                # on déplace tous les fichiers sauf le premier (on garde un original)
-                to_move = g["files"][1:]
-                for p in to_move:
+                # trouver tous les dossiers des fichiers du groupe
+                folders = sorted(set(os.path.dirname(p) for p in g["files"]))
+                
+                preserve_folder = None
+
+                # si plus d'un dossier, demander lequel préserver
+                if len(folders) > 1:
+                    # vérifier si un des dossiers a déjà une décision mémorisée
+                    for f in folders:
+                        if f in preserve_map:
+                            preserve_folder = preserve_map[f]
+                            break
+
+                    if not preserve_folder:
+                        # popup liste pour choisir le dossier à conserver
+                        layout_choice = [[sg.Text("Choisissez le dossier à PRESERVER :")],
+                                        [sg.Listbox(folders, size=(80, len(folders)), key="-CHOICE-", select_mode=sg.LISTBOX_SELECT_MODE_SINGLE)],
+                                        [sg.Button("OK"), sg.Button("Annuler")]]
+                        win_choice = sg.Window("Sélection du dossier à préserver", layout_choice, modal=True)
+                        while True:
+                            e, v = win_choice.read()
+                            if e in (sg.WINDOW_CLOSED, "Annuler"):
+                                win_choice.close()
+                                preserve_folder = None
+                                break
+                            if e == "OK" and v["-CHOICE-"]:
+                                preserve_folder = v["-CHOICE-"][0]
+                                win_choice.close()
+                                # demander si mémoriser cette décision
+                                remember = sg.popup_yes_no(f"Voulez-vous toujours préserver {preserve_folder} pour les futurs doublons de ce dossier ?")
+                                if remember == "Yes":
+                                    preserve_map[preserve_folder] = preserve_folder
+                                break
+
+                # déplacer tous les fichiers hors du dossier préservé
+                for p in g["files"]:
+                    folder = os.path.dirname(p)
+                    if preserve_folder and os.path.abspath(folder) == os.path.abspath(preserve_folder):
+                        continue
                     fn = os.path.basename(p)
                     dst_path = os.path.join(dest, fn)
                     base, ext = os.path.splitext(dst_path)
                     c = 1
-                    # si un fichier existe déjà dans le dossier cible, on renomme
                     while os.path.exists(dst_path):
                         dst_path = f"{base}_{c}{ext}"
                         c += 1
                     shutil.move(p, dst_path)
-            sg.popup("Déplacement terminé. Tous les doublons ont été déplacés vers:", dest)
+
+            sg.popup("Déplacement terminé. Les doublons ont été déplacés vers:", dest)
             window["-STATUS-"].update("Déplacement terminé")
+
         except Exception as e:
             sg.popup("Erreur déplacement:", e)
-
 
 
 window.close()
