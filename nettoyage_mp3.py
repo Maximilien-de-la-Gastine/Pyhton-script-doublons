@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# mp3_dup_finder_gui.py
+# mp3_dup_finder_gui_table.py
 # Requirements: pip install PySimpleGUI mutagen
 
 import os
@@ -94,8 +94,16 @@ layout = [
     [sg.Button("Lancer le scan", key="-START-"), sg.Button("Arrêter", key="-STOP-", disabled=True)],
     [sg.ProgressBar(max_value=100, orientation='h', size=(40, 20), key="-PROG-")],
     [sg.Text("Fichiers traités: 0 / 0", key="-PROGTXT-")],
-    [sg.Listbox(values=[], size=(100, 10), key="-GROUPS-", enable_events=True)],
-    [sg.Button("Afficher fichiers du groupe", key="-SHOW-"), sg.Button("Exporter CSV", key="-EXPORT-"), sg.Button("Déplacer doublons", key="-MOVE-")],
+    [sg.Table(values=[],
+              headings=["Fichier", "Titre", "Artiste", "Album", "Dossier"],
+              auto_size_columns=False,
+              col_widths=[30,30,30,30,20],
+              display_row_numbers=False,
+              justification='left',
+              key="-TABLE-",
+              select_mode=sg.TABLE_SELECT_MODE_EXTENDED,
+              num_rows=20)],
+    [sg.Button("Exporter CSV", key="-EXPORT-"), sg.Button("Déplacer sélection", key="-MOVE-")],
     [sg.StatusBar("", key="-STATUS-", size=(80,1))]
 ]
 
@@ -126,12 +134,15 @@ while True:
                 update_progress_bar(msg[1], total_files)
             elif typ == "done":
                 groups_cache = msg[1]
-                lines = [
-                    f"{os.path.basename(p)} (taille={g['size']} octets)"
-                    for g in groups_cache
-                    for p in g["files"]
-                ]
-                window["-GROUPS-"].update(lines)
+                table_values = []
+                for g in groups_cache:
+                    for p, t in zip(g["files"], g.get("tags", [{}])):
+                        title = (t.get("title") or [""])[0]
+                        artist = (t.get("artist") or [""])[0]
+                        album = (t.get("album") or [""])[0]
+                        folder = os.path.basename(os.path.dirname(p))
+                        table_values.append([os.path.basename(p), title, artist, album, folder])
+                window["-TABLE-"].update(values=table_values)
                 window["-STATUS-"].update(f"Scan terminé — {len(groups_cache)} groupes trouvés")
                 window["-START-"].update(disabled=False)
                 window["-STOP-"].update(disabled=True)
@@ -159,19 +170,12 @@ while True:
         window["-START-"].update(disabled=True)
         window["-STOP-"].update(disabled=False)
         total_files = 0
-        window["-GROUPS-"].update([])
+        window["-TABLE-"].update(values=[])
         groups_cache = []
 
     if event == "-STOP-":
         sg.popup("Arrêt demandé — fermez la fenêtre pour stopper.")
         window["-STATUS-"].update("Arrêt demandé (fermez la fenêtre pour forcer l'arrêt)")
-
-    if event == "-SHOW-":
-        sel = values["-GROUPS-"]
-        if not sel:
-            sg.popup("Sélectionnez un fichier.")
-            continue
-        sg.popup_scrolled("\n".join(sel), title="Fichiers du groupe", size=(100,30))
 
     if event == "-EXPORT-":
         if not groups_cache:
@@ -185,38 +189,50 @@ while True:
         try:
             with open(out, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f, delimiter=';')
-                writer.writerow(["title","artist","album","folder"])
+                writer.writerow(["file","title","artist","album","folder"])
                 for g in groups_cache:
                     for p, t in zip(g["files"], g.get("tags", [{}])):
+                        file_name = os.path.basename(p)
                         title = (t.get("title") or [""])[0]
                         artist = (t.get("artist") or [""])[0]
                         album = (t.get("album") or [""])[0]
                         folder = os.path.basename(os.path.dirname(p))
-                        writer.writerow([title, artist, album, folder])
+                        writer.writerow([file_name, title, artist, album, folder])
             sg.popup("Export terminé:", out)
         except Exception as e:
             sg.popup("Erreur export:", e)
 
     if event == "-MOVE-":
-        if not groups_cache:
-            sg.popup("Aucun fichier à déplacer.")
+        selected = values["-TABLE-"]
+        if not selected:
+            sg.popup("Sélectionnez des fichiers à déplacer.")
             continue
-        dest = sg.popup_get_folder("Dossier cible pour déplacer doublons")
+        dest = sg.popup_get_folder("Dossier cible pour déplacer les doublons")
         if not dest:
             continue
         try:
             os.makedirs(dest, exist_ok=True)
-            for g in groups_cache:
-                to_move = g["files"][1:]  # garder le premier fichier
-                for p in to_move:
-                    fn = os.path.basename(p)
-                    dst_path = os.path.join(dest, fn)
-                    base, ext = os.path.splitext(dst_path)
-                    c = 1
-                    while os.path.exists(dst_path):
-                        dst_path = f"{base}_{c}{ext}"
-                        c += 1
-                    shutil.move(p, dst_path)
+            table_values = window["-TABLE-"].get()
+            for idx in selected:
+                file_name = table_values[idx][0]
+                # retrouver le chemin complet
+                full_path = None
+                for g in groups_cache:
+                    for p in g["files"]:
+                        if os.path.basename(p) == file_name:
+                            full_path = p
+                            break
+                    if full_path:
+                        break
+                if not full_path:
+                    continue
+                dst_path = os.path.join(dest, os.path.basename(full_path))
+                base, ext = os.path.splitext(dst_path)
+                c = 1
+                while os.path.exists(dst_path):
+                    dst_path = f"{base}_{c}{ext}"
+                    c += 1
+                shutil.move(full_path, dst_path)
             sg.popup("Déplacement terminé.")
         except Exception as e:
             sg.popup("Erreur déplacement:", e)
