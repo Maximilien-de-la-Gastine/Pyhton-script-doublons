@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# mp3_dup_finder_gui_multi_criteria.py
+# mp3_dup_finder_gui_single_method.py
 # Requirements: pip install PySimpleGUI mutagen
 
 import os
@@ -51,32 +51,25 @@ def get_duration(path):
         return ""
 
 # ---------------- scan ----------------
-def find_duplicates(root, methods, progress_q=None, algo="md5"):
-    """
-    methods: list de critères ['hash', 'name', 'duration', 'size']
-    """
+def find_duplicates(root, method, progress_q=None, algo="md5"):
     files = list(iter_mp3_files(root))
     total_files = len(files)
     if progress_q:
         progress_q.put(("total", total_files))
 
-    # Préparer les informations nécessaires
     file_infos = []
     processed = 0
     for f in files:
         info = {"path": f}
-        if 'hash' in methods:
+        if method == 'hash':
             try:
                 info['hash'] = file_hash(f, algo=algo)
             except Exception:
                 info['hash'] = None
-        if 'name' in methods:
-            # Nom du fichier sans extension + tag title
+        elif method == 'name':
             tags = read_tags(f)
             info['title'] = (tags.get("title") or [os.path.splitext(os.path.basename(f))[0]])[0]
-        if 'duration' in methods:
-            info['duration'] = get_duration(f)
-        if 'size' in methods:
+        elif method == 'size':
             try:
                 info['size'] = os.path.getsize(f)
             except Exception:
@@ -86,7 +79,6 @@ def find_duplicates(root, methods, progress_q=None, algo="md5"):
         if progress_q:
             progress_q.put(("progress", processed))
 
-    # Comparer selon les méthodes sélectionnées
     groups = []
     used = set()
     for i, fi in enumerate(file_infos):
@@ -98,35 +90,28 @@ def find_duplicates(root, methods, progress_q=None, algo="md5"):
             if fj['path'] in used:
                 continue
             match = True
-            for m in methods:
-                if m == 'hash' and fi.get('hash') != fj.get('hash'):
-                    match = False
-                    break
-                if m == 'name' and fi.get('title') != fj.get('title'):
-                    match = False
-                    break
-                if m == 'duration' and fi.get('duration') != fj.get('duration'):
-                    match = False
-                    break
-                if m == 'size' and fi.get('size') != fj.get('size'):
-                    match = False
-                    break
+            if method == 'hash' and fi.get('hash') != fj.get('hash'):
+                match = False
+            elif method == 'name' and fi.get('title') != fj.get('title'):
+                match = False
+            elif method == 'size' and fi.get('size') != fj.get('size'):
+                match = False
             if match:
                 group.append(fj['path'])
                 used.add(fj['path'])
         if len(group) > 1:
             groups.append(group)
             used.update(group)
-    # Lire les tags pour affichage
+
     final_groups = []
     for g in groups:
         tags = [read_tags(p) for p in g]
         final_groups.append({'files': g, 'tags': tags})
     return final_groups
 
-def scan_worker(root, methods, q, algo):
+def scan_worker(root, method, q, algo):
     try:
-        groups = find_duplicates(root, methods, progress_q=q, algo=algo)
+        groups = find_duplicates(root, method, progress_q=q, algo=algo)
         q.put(("done", groups))
     except Exception as e:
         q.put(("error", str(e)))
@@ -136,11 +121,10 @@ sg.theme("SystemDefault")
 
 layout = [
     [sg.Text("Dossier à scanner :"), sg.Input(key="-FOLDER-"), sg.FolderBrowse()],
-    [sg.Text("Méthodes de détection :")],
-    [sg.Checkbox("Hash du fichier (MD5/SHA1/SHA256)", key="-HASH-"),
-     sg.Checkbox("Nom du fichier / Titre", key="-NAME-")],
-    [sg.Checkbox("Durée de la piste", key="-DURATION-"),
-     sg.Checkbox("Taille du fichier", key="-SIZE-")],
+    [sg.Text("Méthode de détection :")],
+    [sg.Radio("Hash du fichier (MD5/SHA1/SHA256)", "METHOD", key="-HASH-", default=True),
+     sg.Radio("Nom du fichier / Titre", "METHOD", key="-NAME-")],
+    [sg.Radio("Taille du fichier", "METHOD", key="-SIZE-")],
     [sg.Text("Algorithme de hash:"), sg.Combo(["md5","sha1","sha256"], default_value="md5", key="-ALGO-")],
     [sg.Button("Lancer le scan", key="-START-"), sg.Button("Arrêter", key="-STOP-", disabled=True)],
     [sg.ProgressBar(max_value=100, orientation='h', size=(40, 20), key="-PROG-")],
@@ -164,13 +148,12 @@ worker_thread = None
 msg_q = queue.Queue()
 groups_cache = []
 total_files = 0
+preserve_map = {}
 
 def update_progress_bar(progress, total):
     frac = int(progress / total * 100) if total else 0
     window["-PROG-"].update(frac)
     window["-PROGTXT-"].update(f"Fichiers traités: {progress} / {total}")
-
-preserve_map = {}
 
 # ---------------- main loop ----------------
 while True:
@@ -214,19 +197,21 @@ while True:
     if event == "-START-":
         folder = values["-FOLDER-"]
         algo = values["-ALGO-"]
-        methods = []
-        if values["-HASH-"]: methods.append("hash")
-        if values["-NAME-"]: methods.append("name")
-        if values["-DURATION-"]: methods.append("duration")
-        if values["-SIZE-"]: methods.append("size")
+        method = None
+        if values["-HASH-"]:
+            method = "hash"
+        elif values["-NAME-"]:
+            method = "name"
+        elif values["-SIZE-"]:
+            method = "size"
         if not folder or not os.path.isdir(folder):
             sg.popup("Veuillez sélectionner un dossier valide.")
             continue
-        if not methods:
-            sg.popup("Veuillez sélectionner au moins une méthode de détection.")
+        if not method:
+            sg.popup("Veuillez sélectionner une méthode de détection.")
             continue
         msg_q = queue.Queue()
-        worker_thread = threading.Thread(target=scan_worker, args=(folder, methods, msg_q, algo), daemon=True)
+        worker_thread = threading.Thread(target=scan_worker, args=(folder, method, msg_q, algo), daemon=True)
         worker_thread.start()
         window["-STATUS-"].update("Scan en cours...")
         window["-START-"].update(disabled=True)
@@ -276,7 +261,6 @@ while True:
             for g in groups_cache:
                 folders = sorted(set(os.path.dirname(p) for p in g["files"]))
                 preserve_folder = None
-                # Vérifier décision mémorisée
                 for f in folders:
                     if f in preserve_map:
                         preserve_folder = preserve_map[f]
@@ -309,7 +293,6 @@ while True:
                                 for f in folders:
                                     preserve_map[f] = preserve_folder
                             break
-                # Déplacement
                 to_move = [p for p in g["files"] if os.path.dirname(p) != preserve_folder]
                 for p in to_move:
                     fn = os.path.basename(p)
